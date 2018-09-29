@@ -37,6 +37,12 @@
 			<type>jar</type>
 		</dependency>
 		<!-- jpcap 0.7 dont have maven artifact -->
+		<dependency>
+			<groupId>jpcap</groupId>
+			<artifactId>jpcap</artifactId>
+			<version>0.7</version>
+			<type>jar</type>
+		</dependency>
 	</dependencies>
 
 	<build>
