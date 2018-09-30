@@ -5,33 +5,44 @@ import java.io.Closeable;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
+import java.io.IOException;
 import java.io.PrintStream;
 import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
-import jpcap.JpcapCaptor;
-import jpcap.JpcapSender;
-import jpcap.NetworkInterface;
-import jpcap.NetworkInterfaceAddress;
-import jpcap.packet.ARPPacket;
-import jpcap.packet.EthernetPacket;
-
 import org.apache.log4j.Logger;
+import org.pcap4j.core.BpfProgram.BpfCompileMode;
+import org.pcap4j.core.NotOpenException;
+import org.pcap4j.core.PcapAddress;
+import org.pcap4j.core.PcapHandle;
+import org.pcap4j.core.PcapNativeException;
+import org.pcap4j.core.PcapNetworkInterface;
+import org.pcap4j.core.PcapNetworkInterface.PromiscuousMode;
+import org.pcap4j.core.Pcaps;
+import org.pcap4j.packet.ArpPacket;
+import org.pcap4j.packet.ArpPacket.ArpHeader;
+import org.pcap4j.packet.EthernetPacket;
+import org.pcap4j.packet.Packet;
+import org.pcap4j.packet.namednumber.ArpHardwareType;
+import org.pcap4j.packet.namednumber.ArpOperation;
+import org.pcap4j.packet.namednumber.EtherType;
+import org.pcap4j.util.ByteArrays;
+import org.pcap4j.util.LinkLayerAddress;
+import org.pcap4j.util.MacAddress;
 
-// export LIBS=jpcap-0.7/lib/
-// java -Djava.library.path=$LIBS -cp $LIBS/jpcap.jar ARPD
-//
-// jpcap: https://web.archive.org/web/20090305095412/http://netresearch.ics.uci.edu/kfujii/jpcap/
-// javadoc: https://web.archive.org/web/20090227060855/http://netresearch.ics.uci.edu/kfujii/jpcap/doc/javadoc/index.html
-//
+// pcap4j: 
+// https://www.pcap4j.org/
+// https://github.com/kaitoy/pcap4j/
 public class ARPD implements Runnable {
 	private static final Logger log = Logger.getLogger("ARPD");
 	// BPF filter for capturing any ARP packet
@@ -72,13 +83,13 @@ public class ARPD implements Runnable {
 		}
 	};
 
-	private final NetworkInterface my_dev;
-	private final JpcapCaptor my_cap;
-	private final JpcapSender my_send;
+	private final PcapNetworkInterface my_dev;
+	private final PcapHandle my_cap;
+	private final PcapHandle my_send;
 	private final IpSubnetList my_excluded;
 	private final IpSubnetList my_included;
 
-	ARPD(final NetworkInterface dev, final JpcapCaptor captor, final JpcapSender sender,
+	ARPD(final PcapNetworkInterface dev, final PcapHandle captor, final PcapHandle sender,
 			final IpSubnetList excluded, final IpSubnetList included) {
 		this.my_dev = dev;
 		this.my_cap = captor;
@@ -195,23 +206,44 @@ public class ARPD implements Runnable {
 		}
 	}
 
+	private static String getIpAddress(final InetAddress addr) {
+		if (addr != null) {
+			return addr.getHostAddress();
+		}
+		return null;
+	}
+
 	public static void main(final String[] args) throws Exception {
-		final NetworkInterface[] deviceList = JpcapCaptor.getDeviceList();
+		System.out.println("Finding pcap devices");
+		final List<PcapNetworkInterface> deviceList = Pcaps.findAllDevs();
 		if (args.length < 1) {
 			System.out.println("Usage: java ARPD <config>");
-
-			for (int i = 0; i < deviceList.length; i++) {
-				final NetworkInterface dev = deviceList[i];
-				System.out.println(i + " :" + dev.name + "(" + dev.description + ")");
-				System.out.println("    data link:" + dev.datalink_name + "(" + dev.datalink_description
-						+ ")");
-				System.out.print("    MAC address:");
-				for (final byte b : dev.mac_address) {
-					System.out.print(Integer.toHexString(b & 0xff) + ":");
+			final StringBuilder sb = new StringBuilder();
+			for (int i = 0; i < deviceList.size(); i++) {
+				final PcapNetworkInterface dev = deviceList.get(i);
+				if (!dev.isLocal()) {
+					continue;
 				}
-				System.out.println();
-				for (final NetworkInterfaceAddress a : dev.addresses) {
-					System.out.println("    address:" + a.address + " " + a.subnet + " " + a.broadcast);
+				System.out.println(i + ": " + dev.getName() + " (" + dev.getDescription() + ")");
+				System.out.print("    MAC addr: ");
+				for (final LinkLayerAddress mac : dev.getLinkLayerAddresses()) {
+					sb.append(byteToEtherAddress(mac.getAddress())).append("/");
+				}
+				if (sb.length() > 0) {
+					sb.setLength(sb.length() - 1);
+				}
+				System.out.println(sb.toString());
+				sb.setLength(0);
+				for (final PcapAddress a : dev.getAddresses()) {
+					final String ip = getIpAddress(a.getAddress());
+					if ("0.0.0.0".equals(ip)) {
+						continue;
+					}
+					final String netmask = getIpAddress(a.getNetmask());
+					final String broad = getIpAddress(a.getBroadcastAddress());
+					System.out.println("    IP addr: " + ip + //
+							" / Netmask: " + netmask + //
+							" / Broadcast: " + broad);
 				}
 			}
 
@@ -221,19 +253,21 @@ public class ARPD implements Runnable {
 			int started = 0;
 
 			// Inicializamos los spoofers para cada device
-			for (int i = 0; i < deviceList.length; i++) {
-				final NetworkInterface dev = deviceList[i];
-				if (devices.contains(dev.name)) {
-					final IpSubnetList excluded = subnets.get(dev.name + EXCLUDE);
-					final IpSubnetList included = subnets.get(dev.name + INCLUDE);
+			for (int i = 0; i < deviceList.size(); i++) {
+				final PcapNetworkInterface dev = deviceList.get(i);
+				if (devices.contains(dev.getName())) {
+					final IpSubnetList excluded = subnets.get(dev.getName() + EXCLUDE);
+					final IpSubnetList included = subnets.get(dev.getName() + INCLUDE);
 					// open Jpcap (interface, snaplen, promisc, time_millis)
-					final JpcapCaptor captor = JpcapCaptor.openDevice(dev, PCAP_FRAME_LENGTH, false, PCAP_TIME_MILLIS);
-					final JpcapSender sender = JpcapSender.openDevice(dev);
-					captor.setFilter(FILTER, true);
+					final PcapHandle captor = dev.openLive(PCAP_FRAME_LENGTH, PromiscuousMode.NONPROMISCUOUS,
+							PCAP_TIME_MILLIS);
+					final PcapHandle sender = dev.openLive(PCAP_FRAME_LENGTH, PromiscuousMode.NONPROMISCUOUS,
+							PCAP_TIME_MILLIS);
+					captor.setFilter(FILTER, BpfCompileMode.OPTIMIZE);
 					final ARPD arpd = new ARPD(dev, captor, sender, excluded, included);
 					final Thread nTh = new Thread(arpd);
 					nTh.setDaemon(true);
-					nTh.setName("ARP:" + dev.name);
+					nTh.setName("ARP:" + dev.getName());
 					nTh.start();
 					started++;
 				}
@@ -243,7 +277,7 @@ public class ARPD implements Runnable {
 
 			while (true) {
 				try {
-					Thread.sleep(1000);
+					doSleep(1000);
 					final long time = System.currentTimeMillis() / 1000L;
 					// ARP Status cada 10 segundos
 					if ((time % ARP_STATUS_DUMP_TIME_SECS) == 0) {
@@ -288,12 +322,12 @@ public class ARPD implements Runnable {
 					// STATS cada 30 segundos
 					if (log.isDebugEnabled()) {
 						if ((time % ARP_STATS_LOG_TIME_SECS) == 0) {
-							log.debug("stats request=" + stats_request.get() + " responses=" + stats_responses.get());
+							log.debug("stats request=" + stats_request.get() + " responses="
+									+ stats_responses.get());
 						}
 					}
 					// HearBeat
 					heartBeat();
-				} catch (InterruptedException ie) {
 				} catch (Exception e) {
 					log.error("Exception: " + e, e);
 				}
@@ -302,90 +336,132 @@ public class ARPD implements Runnable {
 		System.exit(0);
 	}
 
-	public void run() {
-		log.info("Starting spoofing in device=" + my_dev.name);
+	private static String arpHeaderToString(final ArpHeader arp) {
+		final StringBuilder sb = new StringBuilder();
+		sb.append("ARP ").append(arp.getOperation().name());
+		sb.append(" ").append(arp.getSrcHardwareAddr());
+		sb.append("(").append(getIpAddress(arp.getSrcProtocolAddr())).append(")");
+		sb.append(" -> ").append(arp.getDstHardwareAddr());
+		sb.append("(").append(getIpAddress(arp.getDstProtocolAddr())).append(")");
+		return sb.toString();
+	}
 
+	public void run() {
+		log.info("Starting spoofing in device=" + my_dev.getName());
+		final MacAddress devMac;
+		try {
+			final NetworkInterface jnif = NetworkInterface.getByName(my_dev.getName());
+			devMac = MacAddress.getByAddress(jnif.getHardwareAddress());
+		} catch (Exception e) {
+			log.error("Exception: " + e, e);
+			return;
+		}
 		while (true) {
 			try {
-				final ARPPacket arp = (ARPPacket) my_cap.getPacket();
-				if (arp != null) {
-					final StringBuilder sb = new StringBuilder();
-					final boolean run = checkSemaphore(); // true = run baby! run!
-					if (log.isTraceEnabled()) {
-						sb.append("rcvd(").append(my_dev.name).append("): ").append(String.valueOf(arp));
-					}
-					if ((arp.hardtype == ARPPacket.HARDTYPE_ETHER) //
-							&& (arp.prototype == ARPPacket.PROTOTYPE_IP) //
-							&& (arp.operation == ARPPacket.ARP_REQUEST) //
-							&& (arp.hlen == 6) // Ethernet
-							&& (arp.plen == 4)) {  // IPv4
-						final String targetIP = InetAddress.getByAddress(arp.target_protoaddr)
-								.getHostAddress();
-						if (log.isTraceEnabled())
-							sb.append("CHECKING(").append(targetIP).append(")");
-						if (my_excluded.contains(targetIP)) { // REPLY IGNORED
+				final Packet pkt = my_cap.getNextPacket();
+				if (pkt == null) {
+					doSleep(PCAP_TIME_MILLIS);
+					continue;
+				}
+				final ArpPacket arp = pkt.get(ArpPacket.class);
+				final ArpHeader arpHdr = arp.getHeader();
+				final StringBuilder sb = new StringBuilder();
+				final boolean run = checkSemaphore(); // true = run baby! run!
+				if (log.isTraceEnabled()) {
+					sb.append("rcvd(").append(my_dev.getName()).append("): ")
+							.append(arpHeaderToString(arpHdr));
+				}
+				if ((arpHdr.getHardwareType() == ArpHardwareType.ETHERNET) //
+						&& (arpHdr.getProtocolType() == EtherType.IPV4) //
+						&& (arpHdr.getOperation() == ArpOperation.REQUEST) //
+						&& (arpHdr.getHardwareAddrLengthAsInt() == 6) // Ethernet
+						&& (arpHdr.getProtocolAddrLengthAsInt() == 4)) {  // IPv4
+					final String targetIP = getIpAddress(arpHdr.getDstProtocolAddr());
+					if (log.isTraceEnabled())
+						sb.append(" CHECKING(").append(targetIP).append(")");
+					if (my_excluded.contains(targetIP)) { // REPLY IGNORED
+						if (log.isTraceEnabled()) {
+							sb.append(" (EXCLUDED)");
+						}
+					} else {
+						if (my_included.contains(targetIP)) { // REPLY MATCHED
 							if (log.isTraceEnabled()) {
-								sb.append("(EXCLUDED)");
+								sb.append(" (MATCH)");
 							}
-						} else {
-							if (my_included.contains(targetIP)) { // REPLY MATCHED
+							if (run && !testMode) {
+								replySend(devMac, arp, my_send);
+							} else {
 								if (log.isTraceEnabled()) {
-									sb.append("(MATCH)");
-								}
-								if (run && !testMode) {
-									replySend(my_dev, arp, arp.target_protoaddr, my_send);
-								} else {
-									if (log.isTraceEnabled()) {
-										if (testMode) {
-											sb.append("(IGNORED-TEST-MODE)");
-										}
-										if (!run) {
-											sb.append("(IGNORED-NO-RUNNING)");
-										}
+									if (testMode) {
+										sb.append(" (IGNORED-TEST-MODE)");
+									}
+									if (!run) {
+										sb.append(" (IGNORED-NO-RUNNING)");
 									}
 								}
 							}
 						}
-						// Save ARP Status
-						final long time = System.currentTimeMillis() / 1000L;
-						synchronized (arpTable) {
-							arpTable.put(InetAddress.getByAddress(arp.sender_protoaddr).getHostAddress(),
-									new ARPEntry(byteToEtherAddress(arp.sender_hardaddr), my_dev.name, time));
-						}
 					}
-					log.trace(sb.toString());
-					stats_request.incrementAndGet();
+					// Save ARP Status
+					final long time = System.currentTimeMillis() / 1000L;
+					synchronized (arpTable) {
+						arpTable.put(getIpAddress(arpHdr.getSrcProtocolAddr()),
+								new ARPEntry(byteToEtherAddress(arpHdr.getSrcHardwareAddr().getAddress()),
+										my_dev.getName(), time));
+					}
 				}
+				log.trace(sb.toString());
+				stats_request.incrementAndGet();
 			} catch (Exception e) {
 				log.error("Exception: " + e, e);
-				try {
-					Thread.sleep(1000);
-				} catch (Exception ign) {
-				}
+				doSleep(1000);
 			}
 		}
 	}
 
+	private static void doSleep(final long millis) {
+		try {
+			Thread.sleep(millis);
+		} catch (Exception ign) {
+		}
+	}
+
 	// Respondemos con la peticion invertida con la IP indicada
-	static void replySend(final NetworkInterface device, final ARPPacket req, final byte[] ip,
-			final JpcapSender sender) throws java.io.IOException {
-		final ARPPacket arp = new ARPPacket();
-		arp.hardtype = ARPPacket.HARDTYPE_ETHER;
-		arp.prototype = ARPPacket.PROTOTYPE_IP;
-		arp.operation = ARPPacket.ARP_REPLY;
-		arp.hlen = 6;
-		arp.plen = 4;
-		arp.sender_hardaddr = device.mac_address;
-		arp.sender_protoaddr = ip;
-		arp.target_hardaddr = req.sender_hardaddr;
-		arp.target_protoaddr = req.sender_protoaddr;
+	static void replySend(final MacAddress deviceMacAddr, final ArpPacket req, final PcapHandle sender)
+			throws IOException, PcapNativeException, NotOpenException {
+		final ArpPacket.Builder arpBuilder = new ArpPacket.Builder();
+		arpBuilder.hardwareType(ArpHardwareType.ETHERNET) //
+				.protocolType(EtherType.IPV4).operation(ArpOperation.REPLY) //
+				.hardwareAddrLength((byte) MacAddress.SIZE_IN_BYTES) // 6
+				.protocolAddrLength((byte) ByteArrays.INET4_ADDRESS_SIZE_IN_BYTES) // 4
+				.srcHardwareAddr(deviceMacAddr) //
+				.srcProtocolAddr(req.getHeader().getDstProtocolAddr()) //
+				.dstHardwareAddr(MacAddress.ETHER_BROADCAST_ADDRESS) //
+				.dstProtocolAddr(req.getHeader().getSrcProtocolAddr());
+		// final ArpPacket arp = new ArpPacket();
+		// arp.hardtype = ARPPacket.HARDTYPE_ETHER;
+		// arp.prototype = ARPPacket.PROTOTYPE_IP;
+		// arp.operation = ARPPacket.ARP_REPLY;
+		// arp.hlen = 6;
+		// arp.plen = 4;
+		// arp.sender_hardaddr = device.mac_address;
+		// arp.sender_protoaddr = ip;
+		// arp.target_hardaddr = req.sender_hardaddr;
+		// arp.target_protoaddr = req.sender_protoaddr;
 
-		final EthernetPacket ether = new EthernetPacket();
-		ether.frametype = EthernetPacket.ETHERTYPE_ARP;
-		ether.src_mac = device.mac_address;
-		ether.dst_mac = req.sender_hardaddr;
-		arp.datalink = ether;
+		final EthernetPacket.Builder etherBuilder = new EthernetPacket.Builder();
+		etherBuilder.dstAddr(MacAddress.ETHER_BROADCAST_ADDRESS) //
+				.srcAddr(deviceMacAddr) //
+				.type(EtherType.ARP) //
+				.payloadBuilder(arpBuilder) //
+				.paddingAtBuild(true);
+		// final EthernetPacket ether = new EthernetPacket();
+		// ether.frametype = EthernetPacket.ETHERTYPE_ARP;
+		// ether.src_mac = device.mac_address;
+		// ether.dst_mac = req.sender_hardaddr;
+		// arp.datalink = ether;
 
+		final Packet arp = etherBuilder.build();
 		sender.sendPacket(arp);
 		stats_responses.incrementAndGet();
 	}

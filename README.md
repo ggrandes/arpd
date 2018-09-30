@@ -8,8 +8,7 @@ ARP Daemon in Java. Open Source project under Apache License v2.0
 
 #### Usage Example (command line)
 
-    java -cp conf/:lib/arpd-1.0.0.jar:lib/jpcap-0.7.jar:lib/log4j-1.2.17.jar \
-         -Djava.library.path=lib/ \
+    java -cp conf/:lib/arpd-2.0.0.jar:lib/pcap4j-core-1.7.3.jar:lib/pcap4j-packetfactory-static-1.7.3.jar:lib/jna-4.2.1.jar:lib/slf4j-api-1.7.12.jar:lib/slf4j-log4j12-1.7.12.jar:lib/log4j-1.2.17.jar \
          -Darpd.home=/opt/arpd \
          -Darpd.keepalive=/opt/arpd/arpd.alive \
          -Darpd.runfile=/opt/arpd/arpd.run \
