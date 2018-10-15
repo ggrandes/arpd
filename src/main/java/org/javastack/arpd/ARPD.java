@@ -436,7 +436,7 @@ public class ARPD implements Runnable {
 				.protocolAddrLength((byte) ByteArrays.INET4_ADDRESS_SIZE_IN_BYTES) // 4
 				.srcHardwareAddr(deviceMacAddr) //
 				.srcProtocolAddr(req.getHeader().getDstProtocolAddr()) //
-				.dstHardwareAddr(MacAddress.ETHER_BROADCAST_ADDRESS) //
+				.dstHardwareAddr(req.getHeader().getSrcHardwareAddr()) //
 				.dstProtocolAddr(req.getHeader().getSrcProtocolAddr());
 		// final ArpPacket arp = new ArpPacket();
 		// arp.hardtype = ARPPacket.HARDTYPE_ETHER;
@@ -450,7 +450,7 @@ public class ARPD implements Runnable {
 		// arp.target_protoaddr = req.sender_protoaddr;
 
 		final EthernetPacket.Builder etherBuilder = new EthernetPacket.Builder();
-		etherBuilder.dstAddr(MacAddress.ETHER_BROADCAST_ADDRESS) //
+		etherBuilder.dstAddr(req.getHeader().getSrcHardwareAddr()) //
 				.srcAddr(deviceMacAddr) //
 				.type(EtherType.ARP) //
 				.payloadBuilder(arpBuilder) //
